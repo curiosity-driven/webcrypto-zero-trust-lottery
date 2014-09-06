@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<!--
+Copyright 2015 Curiosity driven
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<html spellcheck="no">
+<head>
+	<title>Secure random</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-size: 150%;
+        }
+        body > div {
+            max-width: 650px;
+            margin: 0 auto; 
+            display: block;
+        }
+        .code {
+            font-family: monospace;
+            font-size: larger;
+        }
+        label {
+            margin: 10px;
+            border-left: solid 4px #fff;
+            display: block;
+            padding: 5px 10px;
+        }
+        span {
+            display: block;
+        }
+        .error label {
+            border-left-color: palevioletred;
+        }
+        .info label {
+            border-left-color: cornflowerblue;
+        }
+        .value {
+            width: 100%;
+            border: none;
+            border-bottom: 1px silver solid;
+            padding: 5px;
+            margin: 3px;
+        }
+        input[type="submit"] {
+            margin: 20px;
+            margin-left: 70%;
+            width: 100px;
+        }
+        input:read-only {
+            border-bottom: none;
+        }
+        input:focus {
+            outline: none;
+            border-bottom-color: #56b4ef;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <h1>Fair zero-trust lottery</h1>
+        <p>This page does not use any external resources. For additional security it is advised to
+        run this page without any extensions (e.g. in incognito mode) after careful study of the source
+        code.</p>
+        <p>Copying it on your computer and running it from there also prevents unexpected modifications by third parties.</p>
+        <p>Refreshing this page will generate new secret key.</p>
+        <p>See <a href="https://curiosity-driven.org/webcrypto-zero-trust-lottery">the article</a> for details and prerequisites or <a href="https://github.com/curiosity-driven/webcrypto-zero-trust-lottery">the source code</a>.</p>
+    </div>
+    <div id="info">
+    </div>
+<script>
+'use strict';
+
+function html(parts, ...values) {
+    var replacements = {
+        '"': '&quot;',
+        '\'': '&apos;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '&': '&amp;'
+    };
+    var replaceEntities = text =>
+        text.replace(/["'<>&]/g, match => replacements[match]);
+
+    var div = document.createElement('div');
+    div.innerHTML = parts.map((part, index) =>
+        part + replaceEntities(String(values[index] || ''))
+    ).join('');
+    return div.firstElementChild;
+}
+    
+function showDialog(type, title, value) {
+    var info = document.getElementById('info');
+    var row = html`<form class="${type || ''}">
+        <label><span>${title}</span> 
+        <input value="${value}" class="value code" required/></label>
+        <input type="submit" value="OK"/>
+    </form>`;
+    info.appendChild(row);
+
+    var input = row.querySelector('input');
+    input.select();
+    input.focus();
+    input.scrollIntoView();
+
+    var ok = row.querySelector('input[type="submit"]');
+
+    return new Promise(resolve =>
+        row.addEventListener('submit', function submit(e) {
+            e.preventDefault();
+            row.removeEventListener('click', submit);
+            ok.parentElement.removeChild(ok);
+            input.readOnly = true;
+            resolve(input.value);
+        }));
+}
+
+var showInfo = showDialog.bind(null, 'info');
+var showError = showDialog.bind(null, 'error');
+var showPrompt = showDialog.bind(null, '');
+
+function getRandomInt(max) {
+    var value = crypto.getRandomValues(new Uint8Array(1))[0];
+
+    if (value >= Math.floor(256 / max) * max) {
+        return getRandomInt(max);
+    }
+
+    return value % max;
+}
+
+function Bytes(bytes) {
+    this.bytes = new Uint8Array(bytes);
+}
+
+Bytes.prototype = {
+    get length() {
+        return this.bytes.length;
+    },
+    compareTo: function(other) {
+        return this.toString().localeCompare(other.toString());
+    },
+    equals: function(other) {
+        return this.toString() === other.toString();
+    },
+    toString: function() {
+        return Array.from(this.bytes)
+            .map(byte => byte.toString(16))
+            .map(byte => byte.length < 2 ? '0' + byte : byte)
+            .join('');
+    },
+    digest: function() {
+        return crypto.subtle.digest({
+            name: 'SHA-256'
+        }, this.bytes).then(digest => new Bytes(digest));
+    }
+};
+
+Bytes.parse = function(text) {
+    var bytes = text.match(/.{2}/g);
+    if (!bytes) {
+        throw new Error('Invalid format: ' + text);
+    }
+    return new Bytes(bytes.map(byte => {
+        var number = parseInt(byte, 16);
+        if (isNaN(number)) {
+          throw new Error('Invalid byte: ' + byte);
+        }
+        return number;
+    }));
+};
+
+Bytes.random = function(count) {
+    return new Bytes(crypto.getRandomValues(new Uint8Array(count)));
+};
+
+function async(generatorFunction) {
+    function start(generator, resolve, reject) {
+        function resume(method, value) {
+            try {
+                var result = generator[method](value);
+                if (result.done) {
+                    resolve(result.value);
+                } else {
+                    result.value.then(resumeNext, resumeThrow);
+                }
+            } catch (e) {
+                reject(e);
+            }
+        }
+        var resumeNext = resume.bind(null, 'next');
+        var resumeThrow = resume.bind(null, 'throw');
+        resumeNext();
+    }
+    return (...args) => new Promise(start.bind(this, generatorFunction(...args)));
+}
+
+var ui = {
+    getPlayersCount: () => showPrompt('How many players?', 2).then(Number),
+    sendOwnDigest: showInfo.bind(null, 'Send your digest to everyone:'), 
+    pasteOtherDigest: () => showPrompt('Paste here other participants\' digest (order does not matter):').then(Bytes.parse),
+    cannotParseDigest: showError.bind(null, 'Cannot parse digest. Ignoring.'),
+    sendOwnSecret: showInfo.bind(null, 'Send your secret to everyone:'), 
+    pasteOtherSecret: () => showPrompt('Paste here other participants\' secret:').then(Bytes.parse),
+    noDigestForSecret: showError.bind(null, 'Secret does not match any digest. Ignoring.'),
+    duplicateSecret: showError.bind(null, 'Secret has been already added. Ignoring.'),
+    cannotParseSecret: showError.bind(null, 'Cannot parse secret. Ignoring.'),
+    winnerDigest: showPrompt.bind(null, 'Winner holds this digest:'),
+    unknownError: showError.bind(null, 'Something went wrong!') 
+};
+
+function getRandomBytes(min, max) {
+    return Bytes.random(min + getRandomInt(max - min));
+}
+
+function* drawWinner(ui, getRandomBytes, padding) {
+    var howMany = yield ui.getPlayersCount();
+    var ownSecret = getRandomBytes(padding, padding + howMany);
+    var ownDigest = yield ownSecret.digest();
+    yield ui.sendOwnDigest(ownDigest);
+    var digests = [ ownDigest ];
+    do {
+        try {
+            digests.push(yield ui.pasteOtherDigest());
+        } catch (e) {
+            yield ui.cannotParseDigest(e);
+        }
+    } while (digests.length < howMany);
+    yield ui.sendOwnSecret(ownSecret);
+    var secrets = [ ownSecret ];
+    do {
+        try {
+            const secret = yield ui.pasteOtherSecret();
+            const digest = yield secret.digest();
+
+            if (!digests.some(i => i.equals(digest))) {
+                yield ui.noDigestForSecret(secret);
+            } else if (secrets.some(i => i.equals(secret))) {
+                yield ui.duplicateSecret(secret);
+            } else {
+                secrets.push(secret);
+            }
+        } catch (e) {
+            yield ui.cannotParseSecret(e);
+        }
+    } while (secrets.length < digests.length);
+    var winner = secrets
+        .map(secret => secret.length - padding)
+        .reduce((a, b) => a + b, 0) % howMany;
+    digests.sort((a, b) => a.compareTo(b));
+    return digests[winner];
+}
+
+async(drawWinner)(ui, getRandomBytes, 32).then(ui.winnerDigest, ui.unknownError);
+
+</script>
+</body>
+</html>
